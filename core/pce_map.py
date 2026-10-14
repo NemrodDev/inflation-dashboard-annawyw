@@ -88,19 +88,72 @@ def series_needed(resolved: pd.DataFrame) -> list[str]:
 
 
 # ------------------------------------------------------------------ 3. align with BEA lines
-def align(mapping: pd.DataFrame, pce_meta: pd.DataFrame, prefix="U:") -> dict:
-    """workbook line -> dataset key, matching names in order (BEA renumbers lines)."""
+def _mnemonic_wb(code: str) -> str:
+    """Workbook series code 'E1NDC1' -> 'NDC'."""
+    c = str(code).strip().upper()
+    return c[2:-1] if len(c) >= 5 and c.startswith("E1") else ""
+
+
+def _mnemonic_api(code: str) -> str:
+    """BEA API series code 'DNDCRG' / 'DNDCRC' / 'DNDCRG3' -> 'NDC'."""
+    c = str(code).strip().upper()
+    m = re.match(r"^D([A-Z0-9]{3,4}?)R[GCX]\d*$", c)
+    return m.group(1) if m else ""
+
+
+def _clean_name(s) -> str:
+    s = re.sub(r"\\\d+\\|\(\d+\)", "", str(s))  # footnote marks like \1\ or (1)
+    return _norm(s)
+
+
+def align(mapping: pd.DataFrame, pce_meta: pd.DataFrame, prefix="U:", report=False):
+    """workbook line -> dataset key. BEA renumbers lines and rewords names, so match
+    (1) on the series mnemonic shared by both codes (E1MOT1 <-> DMOTRG), then
+    (2) on cleaned names in table order, then (3) on close names (difflib >= 0.88)."""
+    import difflib
     sub = pce_meta[pce_meta.index.str.startswith(prefix)]
-    keys, names = list(sub.index), [_norm(n) for n in sub["name"]]
-    out, j = {}, 0
-    for r in mapping.itertuples():
-        t = _norm(r.component)
-        for k in range(j, min(j + 25, len(keys))):
-            if names[k] == t:
-                out[r.line] = keys[k]
-                j = k + 1
+    keys = list(sub.index)
+    names = [_clean_name(n) for n in sub["name"]]
+    codes = sub["bea_code"] if "bea_code" in sub.columns else pd.Series("", index=sub.index)
+    by_mn = {}
+    for k, c in codes.items():
+        mn = _mnemonic_api(c)
+        if mn and mn not in by_mn:
+            by_mn[mn] = k
+    out, how, taken = {}, {}, set()
+    for r in mapping.itertuples():  # (1) mnemonic
+        k = by_mn.get(_mnemonic_wb(r.bea_code))
+        if k and k not in taken:
+            out[r.line], how[r.line] = k, "code"
+            taken.add(k)
+    pos = {k: i for i, k in enumerate(keys)}
+    j = 0
+    for r in mapping.itertuples():  # (2) exact cleaned name, in order
+        if r.line in out:
+            j = pos[out[r.line]] + 1
+            continue
+        t = _clean_name(r.component)
+        for i in range(j, min(j + 40, len(keys))):
+            if keys[i] not in taken and names[i] == t:
+                out[r.line], how[r.line] = keys[i], "name"
+                taken.add(keys[i])
+                j = i + 1
                 break
-    return out
+    free = [i for i, k in enumerate(keys) if k not in taken]
+    for r in mapping.itertuples():  # (3) close name
+        if r.line in out or not free:
+            continue
+        t = _clean_name(r.component)
+        best, score = None, 0.0
+        for i in free:
+            sc = difflib.SequenceMatcher(None, t, names[i]).ratio()
+            if sc > score:
+                best, score = i, sc
+        if best is not None and score >= 0.88:
+            out[r.line], how[r.line] = keys[best], f"similar name ({score:.2f})"
+            taken.add(keys[best])
+            free.remove(best)
+    return (out, how) if report else out
 
 
 # ------------------------------------------------------------------ 4. inputs
@@ -155,16 +208,26 @@ def build_inputs(resolved, levels: pd.DataFrame, sa_adjust=True, overrides=None,
 
 
 # ------------------------------------------------------------------ 5. aggregate
-def leaf_table(resolved, pce_meta, keymap):
-    """Most-detailed lines with their dataset key, sign and food/energy flag."""
+def leaf_table(resolved, pce_meta, keymap, prefix="U:"):
+    """Every most-detailed line of BEA's API table (so weights always cover all of PCE).
+    Lines matched to the workbook carry its line number and price source; API lines with
+    no workbook match get id 1000 + their API line number and use their own trend."""
+    rev = {k: ln for ln, k in keymap.items()}
+    comp = resolved.set_index("line")["component"]
+    sub = pce_meta[pce_meta.index.str.startswith(prefix)]
     rows = []
-    for r in resolved.itertuples():
-        k = keymap.get(r.line)
-        if k is None or not bool(pce_meta.loc[k].get("is_leaf", False)):
+    for k, r in sub.iterrows():
+        if not bool(r.get("is_leaf", False)):
             continue
-        rows.append({"line": r.line, "key": k, "component": r.component,
-                     "sign": int(pce_meta.loc[k].get("sign", 1) or 1),
-                     "fe": pce_meta.loc[k].get("fe", "") or "",
+        ln = rev.get(k)
+        in_wb = ln is not None
+        if not in_wb:
+            ln = 1000 + int(r.get("line", 0) or 0)
+        rows.append({"line": ln, "key": k,
+                     "component": comp.get(ln, r["name"]) if in_wb else str(r["name"]),
+                     "in_workbook": in_wb,
+                     "sign": int(r.get("sign", 1) or 1),
+                     "fe": r.get("fe", "") or "",
                      "group": _group(k, pce_meta)})
     return pd.DataFrame(rows)
 
@@ -233,8 +296,43 @@ def run(leaves: pd.DataFrame, resolved, M, actual_line: pd.DataFrame, nominal: p
         "values": F, "status": status, "weights": W,
         "contrib_core": W.loc[:, is_core[is_core].index].mul(F.loc[:, is_core[is_core].index])
             .div(W.loc[:, is_core[is_core].index].sum(axis=1), axis=0),
+        "actual": A, "is_core": is_core,
     }
+    cl = is_core[is_core].index
+    wc = W.loc[:, cl]
+    # each core line's share of the nowcast error: weight share x (nowcast input - BEA's actual)
+    out["error_core"] = wc.mul(F.loc[:, cl] - A.loc[:, cl]).div(wc.sum(axis=1), axis=0)
     return out
+
+
+def error_table(res, leaves, resolved, used, month, window_months=None, n=15):
+    """Core lines ranked by how much of the nowcast's core error they explain.
+    month: the month to explain; window_months: also average over this many months."""
+    E = res["error_core"]
+    if month not in E.index:
+        return pd.DataFrame()
+    e = E.loc[month].dropna()
+    info = leaves.set_index("line")
+    st_ = res["status"].loc[month]
+    w = res["weights"].loc[month, e.index]
+    df = pd.DataFrame({
+        "PCE component": info.loc[e.index, "component"],
+        "Category": info.loc[e.index, "group"],
+        "Input": st_.reindex(e.index),
+        "Series used": [", ".join(used.get(l, [])) or "line trend" for l in e.index],
+        "Core weight %": w / w.sum() * 100,
+        "Nowcast m/m %": res["values"].loc[month, e.index],
+        "Actual m/m %": res["actual"].loc[month, e.index],
+        "Error (bp of core)": e * 100,
+    })
+    df["Gap (pp)"] = df["Nowcast m/m %"] - df["Actual m/m %"]
+    if window_months:
+        win = E.dropna(how="all").loc[:month].iloc[-window_months:]
+        df[f"Avg error {window_months}m (bp)"] = win.mean().reindex(e.index) * 100
+        df[f"Avg |error| {window_months}m (bp)"] = win.abs().mean().reindex(e.index) * 100
+    df = df.reindex(df["Error (bp of core)"].abs().sort_values(ascending=False).index)
+    df.index.name = "Line"
+    return df.head(n).reset_index()
 
 
 # ------------------------------------------------------------------ demo support

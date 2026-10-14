@@ -68,12 +68,21 @@ def lines(df: pd.DataFrame, title: str, ytitle="%", hline=None, height=420, dash
     return _label_last(fig, [(df[c], PALETTE[i % len(PALETTE)]) for i, c in enumerate(df.columns)])
 
 
-def bars(df: pd.DataFrame, title: str, ytitle="%", height=420, barmode="group"):
+def bars(df: pd.DataFrame, title: str, ytitle="%", height=420, barmode="group", labels=None):
+    """labels: format string such as "{:.1f}" to print each bar's value above it."""
     fig = go.Figure()
     for i, c in enumerate(df.columns):
+        kw = {}
+        if labels:
+            kw = dict(text=[labels.format(v) if pd.notna(v) else "" for v in df[c]],
+                      textposition="outside", cliponaxis=False, textfont=dict(size=12))
         fig.add_trace(go.Bar(x=df.index, y=df[c], name=str(c),
-                             marker_color=PALETTE[i % len(PALETTE)], hovertemplate="%{y:.2f}"))
+                             marker_color=PALETTE[i % len(PALETTE)], hovertemplate="%{y:.2f}", **kw))
     fig.update_layout(barmode=barmode, bargap=0.15)
+    if labels:
+        lo, hi = float(np.nanmin(df.to_numpy(dtype=float))), float(np.nanmax(df.to_numpy(dtype=float)))
+        pad = 0.15 * ((hi - lo) or abs(hi) or 1.0)
+        fig.update_yaxes(range=[min(lo, 0) - pad, max(hi, 0) + pad])
     return _layout(fig, title, ytitle, height)
 
 

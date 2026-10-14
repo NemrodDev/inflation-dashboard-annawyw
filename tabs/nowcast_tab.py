@@ -51,15 +51,18 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing):
     if pce is None or not any(k.startswith("U:") for k in pce.idx.columns):
         st.error("BEA underlying-detail PCE data (Tables 2.4.4U/2.4.5U) is required for the nowcast.")
         return
-    keymap = PM.align(mapping, pce.meta)
+    keymap, match_how = PM.align(mapping, pce.meta, report=True)
     leaves = PM.leaf_table(resolved, pce.meta, keymap)
     ukeys = [k for k in pce.idx.columns if k.startswith("U:")]
     actual_line = A.mom(pce.idx[ukeys])
     nominal = pce.extras["nominal"][ukeys]
     actual_core, actual_head = A.mom(pce.idx[pce.core]), A.mom(pce.idx[pce.headline])
     unaligned = mapping[~mapping.line.isin(keymap)]
-    if len(unaligned):
-        st.caption(f"⚠️ {len(unaligned)} workbook lines not found in the BEA API table (see Diagnostics).")
+    unpriced = unaligned[unaligned.source != ""]
+    api_only = int((~leaves.in_workbook).sum()) if "in_workbook" in leaves else 0
+    if len(unpriced) or api_only:
+        st.caption(f"⚠️ {len(unpriced)} priced workbook lines not matched to BEA's API table; "
+                   f"{api_only} BEA detail lines have no workbook match (see Diagnostics).")
     if leaves.empty:
         st.error("Could not match the workbook to BEA's detail lines.")
         return
@@ -130,7 +133,8 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing):
         ct = contrib.loc[target].dropna() * 100  # bp
         g = leaves.set_index("line").reindex(ct.index)["group"]
         by = ct.groupby(g).sum().sort_values()
-        fig = C.bars(pd.DataFrame({"bp": by}), f"Contributions to core PCE, {target:%b %Y} (bp)", "bp")
+        fig = C.bars(pd.DataFrame({"bp": by}), f"Contributions to core PCE, {target:%b %Y} (bp)", "bp",
+                     labels="{:.1f}")
         U.show(fig)
     tbl = leaves.set_index("line")[["component", "group", "fe"]].copy()
     tbl["BEA source"] = src_text.reindex(tbl.index)
@@ -170,6 +174,9 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing):
                "food/energy split; it should be near zero error and checks the structure. "
                "Nowcast errors are on revised data, so real-time errors are larger.")
 
+    # ---------------------------------------------------------- error attribution
+    _error_attribution(res, leaves, resolved, used, core_nc, actual_core, n)
+
     # ---------------------------------------------------------- diagnostics
     with st.expander("Diagnostics"):
         st.markdown("**BEA 2026 annual-update changes applied**" if apply26 else "**BEA 2026 changes off**")
@@ -179,8 +186,75 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing):
         miss = sorted(set(missing) | set(fetch_missing or []))
         if miss:
             st.caption("Series not returned by BLS (lines fall back to their trend): " + ", ".join(miss))
-        trend = tbl[tbl["Status"].isin(["trend", "series missing", "fallback"])]
-        st.caption(f"{len(trend)} lines use their own trend; core weight "
-                   f"{share.get('trend', 0) + share.get('series missing', 0) + share.get('fallback', 0):.1f}%.")
+        # why lines fall back to their own trend, by core weight
+        kind = resolved.set_index("line")["kind"]
+        srcs = resolved.set_index("line")["source"]
+        def reason(ln, status, in_wb):
+            if status in ("data", "carried"):
+                return None
+            if not in_wb:
+                return "BEA line not in workbook"
+            if status == "series missing":
+                return "BLS series not returned"
+            if kind.get(ln) == "implicit":
+                return "BEA 2026: implicit price (portfolio mgmt)"
+            if srcs.get(ln, "") == "":
+                return "No price source in workbook"
+            return "BEA uses non-CPI/PPI data (input costs, implicit, USDA, foreign CPIs)"
+        rs = pd.DataFrame({"line": leaves.line, "in_wb": leaves.in_workbook,
+                           "core": ~leaves.fe.isin(["food", "energy"]),
+                           "status": st_t.reindex(leaves.line).values})
+        rs["reason"] = [reason(l, s_, w) for l, s_, w in zip(rs.line, rs.status, rs.in_wb)]
+        rs["w"] = w_t.reindex(rs.line).abs().values
+        cw = rs.loc[rs.core, "w"].sum()
+        why = (rs[rs.core & rs.reason.notna()].groupby("reason")
+               .agg(Lines=("line", "size"), w=("w", "sum")))
+        if len(why):
+            why["Core weight %"] = why.pop("w") / cw * 100
+            st.markdown("**Why core lines use their own trend**")
+            U.show_df(why.sort_values("Core weight %", ascending=False).reset_index()
+                      .rename(columns={"reason": "Reason"}), hide_index=True)
+        mh = pd.Series(match_how).str.split(" ").str[0].value_counts()
+        st.caption("Workbook ↔ BEA API matching: " + ", ".join(f"{v} by {k}" for k, v in mh.items())
+                   + f"; {len(unaligned)} workbook lines unmatched ({len(unpriced)} of them priced).")
         if len(unaligned):
-            U.show_df(unaligned[["line", "component"]], hide_index=True)
+            U.show_df(unaligned[["line", "component", "bea_code", "source"]], hide_index=True, height=300)
+        api = pce.meta[pce.meta.index.str.startswith("U:")][["name"] + [c for c in ("bea_code", "is_leaf")
+                                                                        if c in pce.meta.columns]]
+        st.download_button("Download BEA API line list (CSV)", api.to_csv().encode(),
+                           "bea_api_lines.csv", "text/csv", key="nc_api_dl")
+
+
+def _error_attribution(res, leaves, resolved, used, core_nc, actual_core, n):
+    st.markdown("**Line items driving the core PCE nowcast error**")
+    both = pd.concat([core_nc.rename("nc"), actual_core.rename("act")], axis=1).dropna()
+    if both.empty:
+        st.info("No months with both a nowcast and published core PCE yet.")
+        return
+    months = list(both.index[-n:])[::-1]
+    a1, a2 = st.columns([2, 1])
+    m_sel = a1.selectbox("Month to explain", months, format_func=lambda d: f"{d:%b %Y}", key="nc_err_m")
+    top = a2.selectbox("Rows", [10, 15, 25, 50], index=1, key="nc_err_n")
+    et = PM.error_table(res, leaves, resolved, used, m_sel, n, top)
+    tot_err = (both.loc[m_sel, "nc"] - both.loc[m_sel, "act"]) * 100
+    lines_err = res["error_core"].loc[m_sel].sum() * 100
+    struct = (res["core_replicated"].get(m_sel, np.nan) - actual_core.get(m_sel, np.nan)) * 100
+    k = st.columns(3)
+    k[0].metric(f"Core nowcast error, {m_sel:%b %Y}", f"{tot_err:+.1f} bp",
+                help="Nowcast minus published core PCE m/m, in basis points")
+    k[1].metric("From line-item inputs", f"{lines_err:+.1f} bp",
+                help="Sum over core lines of weight share × (nowcast input − BEA's actual line m/m)")
+    k[2].metric("From structure / chaining", f"{struct:+.1f} bp",
+                help="Replicated core (BEA line prices, this tab's weights) minus published core")
+    if not et.empty:
+        fmt = {c: "{:.2f}" for c in et.columns if et[c].dtype.kind == "f"}
+        fmt.update({"Core weight %": "{:.3f}", "Nowcast m/m %": "{:.3f}", "Actual m/m %": "{:.3f}",
+                    "Gap (pp)": "{:+.3f}", "Error (bp of core)": "{:+.2f}"})
+        sty = et.style.format(fmt, na_rep="–")
+        sty = U._style_map(sty, lambda v: A.heat_color(v, 0.0, 2.0) if isinstance(v, (int, float)) else "",
+                           ["Error (bp of core)"])
+        U.show_df(sty, hide_index=True)
+        st.caption(f"Ranked by the size of each line's contribution to the {m_sel:%b %Y} error. "
+                   f"Error = line's share of core weight × (nowcast input − BEA's published line m/m); "
+                   f"positive = the nowcast was too high. The last two columns average each line's "
+                   f"error over the {n}-month backtest window.")

@@ -17,26 +17,75 @@ def show(fig):
         st.plotly_chart(fig, use_container_width=True)
 
 
+def numeric_columns(data: pd.DataFrame) -> list:
+    """Columns holding numbers (bools excluded; object columns of numbers included)."""
+    out = []
+    for c in data.columns:
+        s = data[c]
+        if pd.api.types.is_bool_dtype(s):
+            continue
+        if pd.api.types.is_numeric_dtype(s):
+            out.append(c)
+        elif s.dtype == object:
+            v = s.dropna()
+            if len(v) and all(isinstance(x, (int, float, np.number)) and not isinstance(x, bool) for x in v):
+                out.append(c)
+    return out
+
+
 def right_align_config(df, extra=None):
-    """column_config that right-aligns the header and cells of every numeric column.
-    Needs Streamlit >= 1.48 (column 'alignment'); older versions return {}."""
-    data = getattr(df, "data", df)  # unwrap a pandas Styler
+    """column_config right-aligning numeric cells in editable tables (st.data_editor).
+    Streamlit's grid draws headers itself, so header alignment can't be set there."""
+    data = getattr(df, "data", df)
     cfg = {}
     try:
-        for c in data.select_dtypes("number").columns:
+        for c in numeric_columns(data):
             cfg[str(c)] = st.column_config.Column(alignment="right")
-    except TypeError:
+    except TypeError:  # older Streamlit without 'alignment'
         cfg = {}
     cfg.update(extra or {})
     return cfg
 
 
-def show_df(df, **kw):
-    kw["column_config"] = right_align_config(df, kw.get("column_config"))
-    try:
-        st.dataframe(df, width="stretch", **kw)
-    except TypeError:
-        st.dataframe(df, use_container_width=True, **kw)
+_TABLE_CSS = """
+<style>
+.infl-tbl {overflow:auto; border:1px solid #e3e6ea; border-radius:6px; margin-bottom:0.6rem;}
+.infl-tbl table {border-collapse:collapse; width:100%; font-size:13px;
+  font-variant-numeric: tabular-nums;}
+.infl-tbl th, .infl-tbl td {padding:4px 10px; border-bottom:1px solid #eef0f3;
+  white-space:nowrap; text-align:left;}
+.infl-tbl thead th {position:sticky; top:0; z-index:1; background:#f6f7f9; font-weight:600;
+  border-bottom:1px solid #d9dde3;}
+.infl-tbl tbody tr:hover td {filter:brightness(0.97);}
+</style>
+"""
+
+
+def show_df(df, hide_index=False, height=None, **_ignored):
+    """Render a read-only table as HTML so numeric columns have right-aligned
+    headers and cells. Accepts a DataFrame or a pandas Styler (keeps its colours)."""
+    sty = df if hasattr(df, "to_html") and hasattr(df, "data") else None
+    data = sty.data if sty is not None else df
+    if sty is None:
+        num = numeric_columns(data)
+        fmt = {c: ("{:,.0f}" if pd.api.types.is_integer_dtype(data[c]) else "{:.2f}") for c in num}
+        sty = data.style.format(fmt, na_rep="–")
+    num = numeric_columns(data)
+    pos = {c: i for i, c in enumerate(data.columns)}
+    styles = []
+    for c in num:
+        j = pos[c]
+        styles += [{"selector": f"th.col_heading.col{j}", "props": "text-align: right;"},
+                   {"selector": f"td.col{j}", "props": "text-align: right;"}]
+    sty = sty.set_table_styles(styles, overwrite=False)
+    if hide_index:
+        sty = sty.hide(axis="index")
+    max_h = f"max-height:{int(height)}px;" if height else "max-height:640px;"
+    html = f'{_TABLE_CSS}<div class="infl-tbl" style="{max_h}">{sty.to_html()}</div>'
+    if hasattr(st, "html"):
+        st.html(html)
+    else:
+        st.markdown(html, unsafe_allow_html=True)
 
 
 def win(obj):
