@@ -76,11 +76,13 @@ EXTRA_SERIES = [
 ]
 
 # "AI-exposed" consumer items. code -> label. RI values are approximate.
+# SEEE01 is BLS's current name ("Computers, peripherals, and smart home assistants") for
+# personal computers and peripheral equipment; it is also the CPI BEA uses for that PCE line.
 AI_ITEMS = [
-    ("SEEE02", "Computer software & accessories", 0.03),
-    ("SEEE01", "Computers, peripherals & smart home assistants", 0.30),
-    ("SERA01", "Televisions", 0.18),
+    ("SEEE01", "Personal computers and peripheral equipment", 0.30),
+    ("SEEE02", "Computer software and accessories", 0.03),
     ("SSEE041", "Smartphones", 0.30),
+    ("SERA01", "Televisions", 0.18),
 ]
 
 HEADLINE = "SA0"

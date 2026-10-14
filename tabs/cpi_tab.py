@@ -42,7 +42,7 @@ def _detail_keys(ds):
 
 
 def render_ai(ds: A.Dataset, num):
-    U.section(num, "AI-exposed categories — software, computers & peripherals, TVs, phones",
+    U.section(num, "AI-exposed categories — PCs & peripherals, software, smartphones, TVs",
               "Contribution to headline CPI = price-updated relative importance × m/m change. "
               "Relative importances are approximate; update them in config/cpi.py.")
     codes = [c for c in ds.extras.get("ai_codes", []) if c in ds.idx.columns]
@@ -59,10 +59,13 @@ def render_ai(ds: A.Dataset, num):
         U.show(C.stacked_contrib(span, show_total, "Contribution to headline CPI, m/m",
                                  "basis points", total_name="AI basket total"))
     with c2:
-        roll = contrib_bp.rolling(12, min_periods=12).sum()
-        rt = roll.sum(axis=1, min_count=1)
-        U.show(C.stacked_contrib(U.win(roll).dropna(how="all"), U.win(rt).dropna(),
-                                 "Contribution to headline CPI, trailing 12m", "basis points",
+        # y/y change x weight a year earlier, from index levels: unlike a sum of 12 monthly
+        # contributions this isn't blanked for a year by a missing month (Oct 2025)
+        roll = (ds.weights[codes].shift(11) * A.yoy(ds.idx[codes]) * 100).rename(columns=ds.label)
+        rt = roll.sum(axis=1, min_count=len(codes))
+        roll = U.win(roll).dropna(how="all")
+        U.show(C.stacked_contrib(roll, U.win(rt).reindex(roll.index),
+                                 "Contribution to headline CPI, y/y", "basis points",
                                  total_name="AI basket total"))
     c3, c4 = st.columns(2)
     with c3:
