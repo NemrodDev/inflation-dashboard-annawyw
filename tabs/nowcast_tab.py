@@ -21,7 +21,7 @@ def _mapping():
     return PM.load_mapping()
 
 
-def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, demo: bool):
+def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing):
     st.header("CPI/PPI → PCE nowcast")
     mapping = _mapping()
     n_priced = (mapping.source != "").sum()
@@ -47,23 +47,22 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, demo: bool):
     resolved = PM.resolve(mapping, apply26)
     target = A.mom(cpi.idx[cpi.core]).dropna().index.max()
 
-    # ---------------------------------------------------------- PCE detail (live) or synthetic (demo)
-    if demo or pce is None:
-        leaves, actual_line, nominal = PM.synthetic(mapping, resolved, levels)
-        actual_core = actual_head = None
-        if not demo:
-            st.warning("BEA data not loaded: weights and line trends are synthetic.")
-    else:
-        keymap = PM.align(mapping, pce.meta)
-        leaves = PM.leaf_table(resolved, pce.meta, keymap)
-        ukeys = [k for k in pce.idx.columns if k.startswith("U:")]
-        actual_line = A.mom(pce.idx[ukeys])
-        nominal = pce.extras["nominal"][ukeys]
-        actual_core, actual_head = A.mom(pce.idx[pce.core]), A.mom(pce.idx[pce.headline])
-        unaligned = mapping[~mapping.line.isin(keymap)]
-        if len(unaligned):
-            st.caption(f"⚠️ {len(unaligned)} workbook lines not found in the BEA API table "
-                       "(see Diagnostics).")
+    # ---------------------------------------------------------- PCE detail from BEA
+    if pce is None or not any(k.startswith("U:") for k in pce.idx.columns):
+        st.error("BEA underlying-detail PCE data (Tables 2.4.4U/2.4.5U) is required for the nowcast.")
+        return
+    keymap = PM.align(mapping, pce.meta)
+    leaves = PM.leaf_table(resolved, pce.meta, keymap)
+    ukeys = [k for k in pce.idx.columns if k.startswith("U:")]
+    actual_line = A.mom(pce.idx[ukeys])
+    nominal = pce.extras["nominal"][ukeys]
+    actual_core, actual_head = A.mom(pce.idx[pce.core]), A.mom(pce.idx[pce.headline])
+    unaligned = mapping[~mapping.line.isin(keymap)]
+    if len(unaligned):
+        st.caption(f"⚠️ {len(unaligned)} workbook lines not found in the BEA API table (see Diagnostics).")
+    if leaves.empty:
+        st.error("Could not match the workbook to BEA's detail lines.")
+        return
 
     # ---------------------------------------------------------- overrides
     M0, used, missing = PM.build_inputs(resolved, levels, sa_adj)
@@ -110,20 +109,19 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, demo: bool):
     k[3].metric("Core weight priced by CPI/PPI", f"{share.get('data', 0) + share.get('carried', 0):.0f}%")
     st.caption("Core weight by input status: " + " · ".join(f"{i} {v:.1f}%" for i, v in share.items()))
 
-    if pce is not None and not demo:
-        last_act = pce.idx[pce.core].dropna().index.max()
-        rows = []
-        for lab, base, nc in (("Core PCE", pce.idx[pce.core], core_nc), ("Headline PCE", pce.idx[pce.headline], head_nc)):
-            lvl = N.implied_yoy(base, nc)
-            r = A.rates_table(lvl)
-            for d in r.index[r.index > last_act]:
-                rows.append({"Measure": lab, "Month": f"{d:%b %Y}", "m/m %": nc.get(d, np.nan),
-                             **r.loc[d].to_dict()})
-        if rows:
-            t = pd.DataFrame(rows)
-            st.caption(f"Implied rates (nowcast chained onto BEA data through {last_act:%b %Y})")
-            U.show_df(t.style.format({c: "{:.2f}" for c in t.columns if c not in ("Measure", "Month")}
-                                     | {"m/m %": "{:.3f}"}), hide_index=True)
+    last_act = pce.idx[pce.core].dropna().index.max()
+    rows = []
+    for lab, base, nc in (("Core PCE", pce.idx[pce.core], core_nc), ("Headline PCE", pce.idx[pce.headline], head_nc)):
+        lvl = N.implied_yoy(base, nc)
+        r = A.rates_table(lvl)
+        for d in r.index[r.index > last_act]:
+            rows.append({"Measure": lab, "Month": f"{d:%b %Y}", "m/m %": nc.get(d, np.nan),
+                         **r.loc[d].to_dict()})
+    if rows:
+        t = pd.DataFrame(rows)
+        st.caption(f"Implied rates (nowcast chained onto BEA data through {last_act:%b %Y})")
+        U.show_df(t.style.format({c: "{:.2f}" for c in t.columns if c not in ("Measure", "Month")}
+                                 | {"m/m %": "{:.3f}"}), hide_index=True)
 
     # ---------------------------------------------------------- build-up
     st.subheader("Build-up by PCE category")
@@ -156,24 +154,21 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, demo: bool):
 
     # ---------------------------------------------------------- backtest
     st.subheader("Backtest vs published PCE")
-    if actual_core is None:
-        st.info("Load BEA data to backtest against published PCE.")
-    else:
-        n = st.slider("Window (months)", 12, 96, 36, key="nc_bt_n")
-        c1, c2 = st.columns(2)
-        for col, lab, nc, act in ((c1, "Core", core_nc, actual_core), (c2, "Headline", head_nc, actual_head)):
-            df = pd.concat([nc.rename("nc"), act.rename("act")], axis=1).dropna(how="all").iloc[-n:]
-            with col:
-                U.show(C.nowcast_backtest(df["nc"], df["act"], f"{lab} PCE m/m: nowcast vs actual"))
-        stats = pd.DataFrame({
-            "Core nowcast": N.backtest_stats(core_nc, actual_core, n),
-            "Headline nowcast": N.backtest_stats(head_nc, actual_head, n),
-            "Core replication": N.backtest_stats(res["core_replicated"], actual_core, n),
-        })
-        U.show_df(stats.T.style.format("{:.3f}"))
-        st.caption("Replication = BEA's own line prices aggregated with this tab's weights and "
-                   "food/energy split; it should be near zero error and checks the structure. "
-                   "Nowcast errors are on revised data, so real-time errors are larger.")
+    n = st.slider("Window (months)", 12, 96, 36, key="nc_bt_n")
+    c1, c2 = st.columns(2)
+    for col, lab, nc, act in ((c1, "Core", core_nc, actual_core), (c2, "Headline", head_nc, actual_head)):
+        df = pd.concat([nc.rename("nc"), act.rename("act")], axis=1).dropna(how="all").iloc[-n:]
+        with col:
+            U.show(C.nowcast_backtest(df["nc"], df["act"], f"{lab} PCE m/m: nowcast vs actual"))
+    stats = pd.DataFrame({
+        "Core nowcast": N.backtest_stats(core_nc, actual_core, n),
+        "Headline nowcast": N.backtest_stats(head_nc, actual_head, n),
+        "Core replication": N.backtest_stats(res["core_replicated"], actual_core, n),
+    })
+    U.show_df(stats.T.style.format("{:.3f}"))
+    st.caption("Replication = BEA's own line prices aggregated with this tab's weights and "
+               "food/energy split; it should be near zero error and checks the structure. "
+               "Nowcast errors are on revised data, so real-time errors are larger.")
 
     # ---------------------------------------------------------- diagnostics
     with st.expander("Diagnostics"):
@@ -187,6 +182,5 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, demo: bool):
         trend = tbl[tbl["Status"].isin(["trend", "series missing", "fallback"])]
         st.caption(f"{len(trend)} lines use their own trend; core weight "
                    f"{share.get('trend', 0) + share.get('series missing', 0) + share.get('fallback', 0):.1f}%.")
-        if not demo and pce is not None:
-            if len(unaligned):
-                U.show_df(unaligned[["line", "component"]], hide_index=True)
+        if len(unaligned):
+            U.show_df(unaligned[["line", "component"]], hide_index=True)

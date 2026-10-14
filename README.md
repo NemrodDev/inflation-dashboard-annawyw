@@ -8,10 +8,9 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # add your keys
 streamlit run app.py
 ```
 
-Without keys the app opens in **Demo mode** (synthetic data with the real structure),
-so you can check the layout before wiring up APIs. Free keys: BLS (registration
-needed for 50 series/query and 20 years), BEA (required for PCE), FRED (optional,
-for the Cleveland/Atlanta/Dallas Fed alternative measures).
+The app always shows live BLS and BEA data; it won't start without `BLS_API_KEY` and
+`BEA_API_KEY` (both free). FRED is optional, for the Cleveland/Atlanta/Dallas Fed
+alternative measures.
 
 ## What each tab shows
 
@@ -80,7 +79,7 @@ core/sources.py        BLS / BEA / FRED clients + disk cache (no streamlit)
 core/builders.py       turns raw data into Dataset objects
 core/analytics.py      rates, weights, contributions, diffusion, release table
 core/pce_map.py        line-level nowcast engine (BEA workbook)
-core/demo.py           synthetic data
+core/demo.py           synthetic data for tests only (never shown in the app)
 core/charts.py         plotly figures
 tabs/                  one module per tab
 tests/smoke_test.py    analytics on demo data
