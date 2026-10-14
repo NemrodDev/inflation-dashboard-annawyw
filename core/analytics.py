@@ -309,10 +309,20 @@ def bea_tree(names: list[str], values: list[float], tol=0.002):
             parents[c] = i
             assign(c, lvl + 1)
 
-    i = 0
-    while i < n:
-        assign(i, 0)
-        i = sub(i)[0]
-    for k in range(n, n_all):
-        leaf[k] = False
+    root_end, root_children = sub(0)
+    if root_children:
+        # Only lines inside the first line's (total PCE's) breakdown are real detail.
+        # Everything after it is addenda/special aggregates, with or without an
+        # "Addenda:" header (e.g. "PCE excluding energy", "Control group").
+        assign(0, 0)
+        for k in range(root_end, n_all):
+            leaf[k] = False
+            levels[k] = 0
+    else:  # total didn't reconcile: fall back to top-level runs before 'Addenda'
+        i = 0
+        while i < n:
+            assign(i, 0)
+            i = sub(i)[0]
+        for k in range(n, n_all):
+            leaf[k] = False
     return levels, parents, leaf

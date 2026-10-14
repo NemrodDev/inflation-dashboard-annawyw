@@ -232,7 +232,8 @@ def build_pce(maj_p, maj_n, maj_meta, det_p, det_n, det_meta, notes) -> Dataset:
         meta.loc[keys, "is_leaf"] = leaf
         if pfx == "U:":
             # food/energy flags via ancestors
-            anc_names = [n.lower() for n in names]
+            import re as _re
+            anc_names = [_re.sub(r"\s*(\(\d+\)|\\\d+\\)", "", n).strip().lower() for n in names]
             fe, sgn = [], []
             for i in range(len(keys)):
                 p, flag, sg = i, "", 1

@@ -96,6 +96,17 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing):
             res[nm] = res[nm] - (e if pd.notna(e) else 0)
         core_nc, head_nc = res["core"], res["headline"]
 
+    # structure check: BEA's own line prices through this tab's weights must reproduce core PCE
+    rep = N.backtest_stats(res["core_replicated"], actual_core, 24)
+    if rep and rep["MAE (pp)"] * 100 > 2.0:
+        st.warning(f"Structure check failed: aggregating BEA's own line prices with these weights "
+                   f"misses published core PCE by {rep['MAE (pp)'] * 100:.1f} bp a month on average "
+                   f"(should be under ~1 bp). The line hierarchy or food/energy split read from BEA's "
+                   f"table is off, so treat the nowcast with caution and send me the Diagnostics.")
+    elif rep:
+        st.caption(f"✅ Structure check: BEA's line prices aggregate to published core PCE within "
+                   f"{rep['MAE (pp)'] * 100:.2f} bp/month (24m average).")
+
     # ---------------------------------------------------------- headline numbers
     st.subheader(f"Nowcast for {target:%B %Y}")
     st_t = res["status"].loc[target] if target in res["status"].index else pd.Series(dtype=str)
