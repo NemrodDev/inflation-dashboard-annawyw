@@ -52,17 +52,22 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing):
         st.error("BEA underlying-detail PCE data (Tables 2.4.4U/2.4.5U) is required for the nowcast.")
         return
     keymap, match_how = PM.align(mapping, pce.meta, report=True)
-    leaves = PM.leaf_table(resolved, pce.meta, keymap)
+    leaves, wb_unmatched = PM.leaves_from_workbook(resolved, pce.meta, keymap)
     ukeys = [k for k in pce.idx.columns if k.startswith("U:")]
     actual_line = A.mom(pce.idx[ukeys])
-    nominal = pce.extras["nominal"][ukeys]
+    nominal = pce.extras["nominal"].reindex(columns=ukeys)
+    no_data = leaves[~leaves.key.isin([k for k in ukeys if nominal[k].notna().any()])]
+    if len(no_data):
+        wb_unmatched = list(wb_unmatched) + no_data.line.tolist()
+        leaves = leaves[~leaves.line.isin(no_data.line)]
     actual_core, actual_head = A.mom(pce.idx[pce.core]), A.mom(pce.idx[pce.headline])
     unaligned = mapping[~mapping.line.isin(keymap)]
     unpriced = unaligned[unaligned.source != ""]
-    api_only = int((~leaves.in_workbook).sum()) if "in_workbook" in leaves else 0
-    if len(unpriced) or api_only:
-        st.caption(f"⚠️ {len(unpriced)} priced workbook lines not matched to BEA's API table; "
-                   f"{api_only} BEA detail lines have no workbook match (see Diagnostics).")
+    st.caption(f"Building blocks: the {len(leaves)} workbook lines with a price source in column D "
+               f"(BEA's deflation level); BEA's API supplies their spending weights and published prices.")
+    if len(unpriced):
+        st.caption(f"⚠️ {len(unpriced)} priced workbook lines not found in BEA's API table and left out "
+                   f"(see Diagnostics).")
     if leaves.empty:
         st.error("Could not match the workbook to BEA's detail lines.")
         return

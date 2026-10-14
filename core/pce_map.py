@@ -232,6 +232,64 @@ def leaf_table(resolved, pce_meta, keymap, prefix="U:"):
     return pd.DataFrame(rows)
 
 
+# Major PCE categories (Table 2.8.4 level) used to label workbook lines
+MAJOR_GROUPS = [
+    "Motor vehicles and parts", "Furnishings and durable household equipment",
+    "Recreational goods and vehicles", "Other durable goods",
+    "Food and beverages purchased for off-premises consumption", "Clothing and footwear",
+    "Gasoline and other energy goods", "Other nondurable goods", "Housing and utilities",
+    "Health care", "Transportation services", "Recreation services",
+    "Food services and accommodations", "Financial services and insurance", "Other services",
+    "Net foreign travel", "Final consumption expenditures of nonprofit institutions serving households",
+]
+
+
+def leaves_from_workbook(resolved, pce_meta, keymap):
+    """Building blocks = the workbook lines that have a price source in column D
+    (BEA's own deflation level). BEA's API supplies only each line's spending weight
+    and published price. Returns (leaves, unmatched priced lines)."""
+    mp = resolved.sort_values("line").reset_index(drop=True)
+    names = mp["component"].str.strip()
+    low = names.str.lower()
+
+    def span(start, end):
+        a = mp.index[names == start]
+        b = mp.index[names == end]
+        if not len(a) or not len(b):
+            return set()
+        return set(mp.loc[a[0]:b[0] - 1, "line"])
+
+    food = span("Food and beverages purchased for off-premises consumption", "Clothing and footwear")
+    energy = (span("Gasoline and other energy goods", "Other nondurable goods")
+              | span("Electricity and gas", "Health care"))
+    majors = [g.lower() for g in MAJOR_GROUPS]
+    rows, unmatched = [], []
+    group, neg_block = "", False
+    for i, r in mp.iterrows():
+        nm, lw = names[i], low[i]
+        # exact names only: "Clothing and footwear services" or "Recreation services, gross
+        # output" must not start a new category (NPISH carries a suffix, so prefix-match it)
+        hit = next((MAJOR_GROUPS[j] for j, g in enumerate(majors)
+                    if lw == g or (g.startswith("final consumption") and lw.startswith(g))), None)
+        if hit:
+            group = hit
+        priced = r["source"] != ""
+        if not priced:
+            # a 'Less:' header with no source makes the priced lines under it negative
+            neg_block = lw.startswith("less")
+            continue
+        sign = -1 if (lw.startswith("less") or neg_block) else 1
+        k = keymap.get(r["line"])
+        if k is None:
+            unmatched.append(r["line"])
+            continue
+        rows.append({"line": r["line"], "key": k, "component": nm, "in_workbook": True,
+                     "sign": sign,
+                     "fe": "food" if r["line"] in food else "energy" if r["line"] in energy else "",
+                     "group": group or "Other"})
+    return pd.DataFrame(rows), unmatched
+
+
 def _group(key, meta, depth=3):
     """Ancestor at a readable depth (e.g. 'Motor vehicles and parts', 'Health care')."""
     chain = [key]

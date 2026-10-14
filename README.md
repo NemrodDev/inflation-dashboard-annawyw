@@ -37,7 +37,9 @@ supercore).
   implicit price (CES quantity extrapolator, so it uses the line's trend); legal services →
   PPIs from 2024 (PPI offices of lawyers as stand-in, BEA doesn't name its PPIs); computer
   software → CPI software + PPI game software publishing + PPI hosting/ASP (equal weights).
-- Weights = last month's nominal spending by line (Table 2.4.5U), signed for "Less:" lines;
+- Building blocks = the workbook lines with a price source in column D (BEA's deflation
+  level), matched to BEA's API by series code. Weights = last month's nominal spending by
+  line (Table 2.4.5U), signed for "Less:" lines;
   core excludes the food and energy subtrees.
 - Lines BEA prices from non-CPI/PPI data use the line's own recent trend (choice of method).
 - Inputs BEA seasonally adjusts itself ("SA by BEA") get a simple 5-year seasonal correction.
