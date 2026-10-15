@@ -285,3 +285,76 @@ def render_fred(series: list, fred_key: str | None, num, title, loader):
         show(C.lines(df, title, "%", hline=2.0, height=460))
     for e in errs:
         st.caption(f"⚠️ {e}")
+
+
+# ------------------------------------------------------------------ sortable compact table
+_SORT_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<style>
+body {margin:0; font-family:'Source Sans Pro','Source Sans 3',sans-serif; color:#1f2328; background:#fff;}
+.wrap {overflow:auto; max-height:__H__px; border:1px solid #e3e6ea; border-radius:6px; display:inline-block;
+  max-width:100%;}
+table {border-collapse:collapse; width:auto; font-size:13px; font-variant-numeric:tabular-nums;}
+th, td {padding:3px 8px; border-bottom:1px solid #eef0f3; text-align:left; vertical-align:top;
+  white-space:nowrap;}
+td.wrap-col {white-space:normal; min-width:120px; max-width:__W__px;}
+th {position:sticky; top:0; z-index:1; background:#f6f7f9; font-weight:600; border-bottom:1px solid #d9dde3;
+  cursor:pointer; user-select:none;}
+th:hover {background:#eceff3;}
+th .arr {color:#8a9099; font-size:10px; margin-left:3px;}
+.num {text-align:right;}
+tbody tr:hover td {background:#f7f8fa;}
+</style></head><body><div class="wrap"><table id="t"><thead><tr>__HEAD__</tr></thead>
+<tbody>__BODY__</tbody></table></div>
+<script>
+const t=document.getElementById('t'), ths=t.tHead.rows[0].cells; let col=-1, asc=true;
+for (let i=0;i<ths.length;i++) ths[i].addEventListener('click',()=>{
+  asc = (col===i) ? !asc : true; col=i;
+  const num = ths[i].dataset.num==='1', rows=[...t.tBodies[0].rows];
+  const key = r => {const v=r.cells[i].dataset.v; return num ? (v===''? null : parseFloat(v)) : v.toLowerCase();};
+  rows.sort((a,b)=>{const x=key(a), y=key(b);
+    if (x===null||x==='') return 1; if (y===null||y==='') return -1;   // blanks always last
+    return (x<y?-1:x>y?1:0)*(asc?1:-1);});
+  rows.forEach(r=>t.tBodies[0].appendChild(r));
+  for (const h of ths) h.querySelector('.arr').textContent='↕';
+  ths[i].querySelector('.arr').textContent = asc ? '▲' : '▼';
+});
+</script></body></html>"""
+
+
+def sortable_table(df: pd.DataFrame, fmt: dict | None = None, wrap_cols=(), wrap_width=300,
+                   max_height=640, heat: dict | None = None):
+    """Compact HTML table: click a heading to sort (again to reverse); columns as narrow as their
+    content; numeric columns and headings right-aligned; long text columns wrap at wrap_width px."""
+    import streamlit.components.v1 as components
+    doc, h = sortable_doc(df, fmt, wrap_cols, wrap_width, max_height, heat)
+    components.html(doc, height=h + 6, scrolling=False)
+
+
+def sortable_doc(df, fmt=None, wrap_cols=(), wrap_width=300, max_height=640, heat=None):
+    """heat: {column: (center, scale)} -> diverging red (above center) / blue (below) cell colours."""
+    import html as _h
+    fmt, heat = fmt or {}, heat or {}
+    est = 30   # header; rows: one line (21px) plus extra lines where wrapped text overflows
+    for _, r in df.iterrows():
+        lines = max([1] + [-(-len(str(r[c])) * 6.3 // max(wrap_width - 16, 50)) for c in wrap_cols if c in df])
+        est += 22 + 16 * (int(lines) - 1)
+    height = int(min(max_height, est + 12))
+    num = set(numeric_columns(df))
+    head = "".join(f'<th class="{"num" if c in num else ""}" data-num="{int(c in num)}">{_h.escape(str(c))}'
+                   f'<span class="arr">↕</span></th>' for c in df.columns)
+    body = []
+    for _, r in df.iterrows():
+        cells = []
+        for c in df.columns:
+            v = r[c]
+            blank = v is None or (not isinstance(v, str) and pd.isna(v))
+            shown = "–" if blank else (fmt[c].format(v) if c in fmt else str(v))
+            key = "" if blank else (repr(float(v)) if c in num else str(v))
+            cls = "num" if c in num else ("wrap-col" if c in wrap_cols else "")
+            sty = A.heat_color(float(v), *heat[c]) if c in heat and not blank else ""
+            cells.append(f'<td class="{cls}" style="{sty}" data-v="{_h.escape(key, quote=True)}">'
+                         f'{_h.escape(shown)}</td>')
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    doc = (_SORT_HTML.replace("__HEAD__", head).replace("__BODY__", "".join(body))
+           .replace("__H__", str(height)).replace("__W__", str(wrap_width)))
+    return doc, height

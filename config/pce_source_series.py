@@ -206,23 +206,42 @@ BEA_2026_CHANGES = {
         "kind": "implicit",
         "note": "BEA 2026: no longer deflated with the PPI; quantity extrapolated with "
                 "BLS CES employment for the industry, so the price is implicit. "
-                "Not observable from CPI/PPI: uses the line's own trend (or your override).",
+                "Nowcast (handoff recipe): price = 0.017752 + 0.785998 × last month's price m/m + "
+                "6.154821 × S&P 500 log return + 5.740161 × Treasury TR log return two months earlier.",
     },
     "Legal services": {
-        "series": [("ppi", "PCU541110541110", 1)],  # VERIFY: BEA composite of detailed legal-services PPIs
+        # Fixed-weight composite of PPIs (BLS ids; FRED drops the dashes, e.g. PCU54115411).
+        "series": [("ppi", "PCU5411105411103", 0.368),    # Offices of lawyers: civil negligence
+                   ("ppi", "PCU5411--5411--", 0.350),     # Legal services (industry group)
+                   ("ppi", "PCU5411105411106", 0.172),    # Wills, estate planning and probate
+                   ("ppi", "PCU5411105411102", 0.086),    # Real estate legal services
+                   ("ppi", "PCU541110541110A", 0.024)],   # Labor and employment legal services
         "kind": "ppi",
         "start": "2024-01-01",
-        "note": "BEA 2026: CPI legal services replaced from 2024 by a BEA composite of detailed "
-                "PPIs for legal services bought by households. BEA does not name the PPIs; "
-                "PPI Offices of lawyers is used as the stand-in.",
+        "note": "BEA 2026: CPI legal services replaced from 2024 by a composite of PPIs: civil negligence "
+                "36.8%, legal services 35.0%, wills/estate planning/probate 17.2%, real estate 8.6%, "
+                "labor and employment 2.4%.",
     },
     "Computer software and accessories": {
-        "series": [("cpi", "SEEE02", 1),
-                   ("ppi", "PCU513210513210|PCU511210511210", 1),   # VERIFY: game software publishing
-                   ("ppi", "PCU518210518210", 1)],                   # VERIFY: hosting, ASP, IT infrastructure
+        # Fixed-weight composite: 60% CPI computer software & accessories, 20% PPI game software
+        # publishing, 20% PPI hosting/ASP/other IT infrastructure provisioning, plus a constant.
+        "series": [("cpi", "SEEE02", 0.60),
+                   ("ppi", "PCU5132105132107|PCU5112105112107", 0.20),   # game software publishing
+                   ("ppi", "PCU5182105182105", 0.20)],                   # hosting, ASP, IT infrastructure
+        "constant": -0.001087,   # per month, as a fraction (= -0.1087 percentage points of m/m)
         "kind": "mixed",
-        "note": "BEA 2026: composite of CPI computer software & accessories, PPI game software "
-                "publishing and PPI hosting/ASP/IT infrastructure. Weights not published (equal); "
-                "industry-level PPIs used where the product-level ids are not verified.",
+        "note": "BEA 2026: 0.6 × CPI computer software & accessories + 0.2 × PPI game software "
+                "publishing + 0.2 × PPI hosting, ASP & other IT infrastructure, then a constant of "
+                "-0.001087 (−0.109 pp) added to the monthly change.",
     },
+}
+
+
+# ---------------------------------------------------------------------------
+# Nowcast rules (this app's choices, not BEA methodology; applied under either methodology).
+# pce_lag_weight w: line nowcast = w x the line's own published PCE m/m for the previous month
+#                                  + (1 - w) x its CPI/PPI input(s) for the current month.
+# ---------------------------------------------------------------------------
+NOWCAST_RULES = {
+    "Spectator sports": {"pce_lag_weight": 0.70},   # 70% last month's PCE, 30% CPI admission to sporting events
 }
