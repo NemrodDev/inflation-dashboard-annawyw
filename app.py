@@ -54,7 +54,8 @@ def get_nowcast_series(start_year, end_year):
     from core import pce_map as PM
     ids = PM.series_needed(PM.resolve(PM.load_mapping(), True)) + \
         PM.series_needed(PM.resolve(PM.load_mapping(), False))
-    ids = list(dict.fromkeys(ids))
+    from core import pm_model as PMM
+    ids = list(dict.fromkeys(ids + PMM.CES_IDS))   # + CES employment/hours for the portfolio-management model
     return B.load_nowcast_series_live(ids, start_year, end_year, BLS_KEY)
 
 
@@ -123,4 +124,5 @@ with tabs[3]:
     if nc_err:
         st.error(f"Nowcast inputs failed to load: {nc_err}")
     else:
-        nowcast_tab.render(cpi, pce, nc_in[0], nc_in[1])
+        nowcast_tab.render(cpi, pce, nc_in[0], nc_in[1], fred_key=FRED_KEY, fred_loader=get_fred,
+                           av_key=secret("ALPHAVANTAGE_API_KEY"), allow_bond_edit=False)
