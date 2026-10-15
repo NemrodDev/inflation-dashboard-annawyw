@@ -55,7 +55,8 @@ def get_nowcast_series(start_year, end_year):
     ids = PM.series_needed(PM.resolve(PM.load_mapping(), True)) + \
         PM.series_needed(PM.resolve(PM.load_mapping(), False))
     from core import pm_model as PMM
-    ids = list(dict.fromkeys(ids + PMM.CES_IDS))   # + CES employment/hours for the portfolio-management model
+    from core import npish_model as NPM
+    ids = list(dict.fromkeys(ids + PMM.CES_IDS + NPM.IDS))   # + portfolio-mgmt CES series, NPISH regressors
     return B.load_nowcast_series_live(ids, start_year, end_year, BLS_KEY)
 
 
@@ -125,4 +126,5 @@ with tabs[3]:
         st.error(f"Nowcast inputs failed to load: {nc_err}")
     else:
         nowcast_tab.render(cpi, pce, nc_in[0], nc_in[1], fred_key=FRED_KEY, fred_loader=get_fred,
-                           av_key=secret("ALPHAVANTAGE_API_KEY"), allow_bond_edit=False)
+                           av_key=secret("ALPHAVANTAGE_API_KEY"), allow_bond_edit=False,
+                           allow_overrides=False)
