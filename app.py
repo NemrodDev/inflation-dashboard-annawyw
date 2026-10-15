@@ -13,7 +13,7 @@ import streamlit as st
 
 from core import sources as src
 from core import builders as B
-from tabs import cpi_tab, ppi_tab, pce_tab, nowcast_tab
+from tabs import cpi_tab, ppi_tab, pce_tab, nowcast_tab, summary_tab
 
 st.set_page_config(page_title="Inflation Dashboard", page_icon="📈", layout="wide")
 
@@ -54,7 +54,9 @@ def get_nowcast_series(start_year, end_year):
     from core import pce_map as PM
     ids = PM.series_needed(PM.resolve(PM.load_mapping(), True)) + \
         PM.series_needed(PM.resolve(PM.load_mapping(), False))
-    ids = list(dict.fromkeys(ids))
+    from core import pm_model as PMM
+    from core import npish_model as NPM
+    ids = list(dict.fromkeys(ids + PMM.CES_IDS + NPM.IDS))   # + portfolio-mgmt CES series, NPISH regressors
     return B.load_nowcast_series_live(ids, start_year, end_year, BLS_KEY)
 
 
@@ -102,7 +104,7 @@ cpi, cpi_err = load(get_cpi, int(start_year), this_year, full)
 ppi, ppi_err = load(get_ppi, int(start_year), this_year, full)
 pce, pce_err = load(get_pce, int(start_year), this_year)
 
-tabs = st.tabs(["CPI", "PPI", "PCE", "CPI/PPI → PCE nowcast"])
+tabs = st.tabs(["CPI", "PPI", "PCE", "Summary measures", "CPI/PPI → PCE nowcast"])
 with tabs[0]:
     if cpi is not None:
         cpi_tab.render(cpi, FRED_KEY, get_fred)
@@ -118,9 +120,16 @@ with tabs[2]:
         pce_tab.render(pce, FRED_KEY, get_fred)
     else:
         st.error(f"PCE load failed: {pce_err}")
+with tabs[4]:   # nowcast runs before the summary tab so its estimate can be shown there
+    try:
+        nc_in, nc_err = load(get_nowcast_series, int(start_year), this_year)
+        if nc_err:
+            st.error(f"Nowcast inputs failed to load: {nc_err}")
+        else:
+            nowcast_tab.render(cpi, pce, nc_in[0], nc_in[1], fred_key=FRED_KEY, fred_loader=get_fred,
+                               av_key=secret("ALPHAVANTAGE_API_KEY"), allow_bond_edit=False,
+                               allow_overrides=False)
+    except Exception as e:  # noqa: BLE001  (keep the other tabs working)
+        st.error(f"Nowcast failed: {e}")
 with tabs[3]:
-    nc_in, nc_err = load(get_nowcast_series, int(start_year), this_year)
-    if nc_err:
-        st.error(f"Nowcast inputs failed to load: {nc_err}")
-    else:
-        nowcast_tab.render(cpi, pce, nc_in[0], nc_in[1])
+    summary_tab.render(pce, cpi, FRED_KEY, get_fred, st.session_state.get("nc_summary"))

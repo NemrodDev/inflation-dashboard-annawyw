@@ -54,6 +54,7 @@ def _ids(kind, code, seasonal):
 def resolve(mapping: pd.DataFrame, apply_2026=True) -> pd.DataFrame:
     rows = []
     changes = {_norm(k): v for k, v in SS.BEA_2026_CHANGES.items()}
+    rules = {_norm(k): v for k, v in getattr(SS, "NOWCAST_RULES", {}).items()}
     for r in mapping.itertuples():
         terms = SS.SOURCE_SERIES.get(r.source)
         kind = "trend"
@@ -62,14 +63,15 @@ def resolve(mapping: pd.DataFrame, apply_2026=True) -> pd.DataFrame:
             kind = kinds.pop() if len(kinds) == 1 else "mixed"
         out = {"line": r.line, "kind": kind, "method": "BEA workbook",
                "terms": [(_ids(k, c, r.seasonal), w) for k, c, w in (terms or [])],
-               "new_terms": None, "start": None, "note": "",
+               "new_terms": None, "start": None, "note": "", "constant": 0.0,
+               "lag_w": float(rules.get(_norm(r.component), {}).get("pce_lag_weight", 0.0)),
                "bea_sa": "by bea" in r.seasonal.lower()}
         if not terms and r.source:
             out["note"] = "BEA uses non-CPI/PPI data; line trend used"
         ch = changes.get(_norm(r.component))
         if apply_2026 and ch:
             new = [(_ids(k, c, r.seasonal), w) for k, c, w in ch["series"]]
-            out.update(method="BEA 2026 update", note=ch["note"])
+            out.update(method="BEA 2026 update", note=ch["note"], constant=float(ch.get("constant", 0.0)))
             if ch.get("start"):
                 out.update(new_terms=new, start=pd.Timestamp(ch["start"]), kind=ch["kind"])
             else:
@@ -165,11 +167,22 @@ def seasonal_adjust(m: pd.Series, years=5) -> pd.Series:
     return m - (same - base).fillna(0)
 
 
+def is_sa_id(sid: str) -> bool:
+    """BLS ids that are already seasonally adjusted: CPI CUSR/CUSS..., PPI WPS... (PCU/WPU are NSA)."""
+    return sid.startswith(("CUSR", "CUSS", "WPS"))
+
+
+ADJ_LABEL = {"sa": "SA", "nsa": "NSA", "nsa_sa": "NSA → SA here"}
+
+
 def build_inputs(resolved, levels: pd.DataFrame, sa_adjust=True, overrides=None, target=None):
-    """Returns (M: month x line m/m from sources, used: line -> ids used, missing ids)."""
+    """Returns (M: month x line m/m from sources, used: line -> ids used, missing ids).
+    build_inputs.info afterwards maps each id used -> {"adj": "SA" | "NSA" | "NSA → SA here",
+    "mm": the m/m that went into the nowcast for `target` (after any seasonal adjustment)}."""
     mom = levels.pct_change(fill_method=None) * 100
     overrides = overrides or {}
     used, missing, cols = {}, set(), {}
+    info = {}
 
     def comb(terms, bea_sa):
         acc, wsum, ids = None, None, []
@@ -179,8 +192,13 @@ def build_inputs(resolved, levels: pd.DataFrame, sa_adjust=True, overrides=None,
                 missing.update(cands[:1])
                 continue
             m = mom[sid].copy()
-            if sa_adjust and bea_sa and not sid.startswith("CUSR"):
+            adj = "sa" if is_sa_id(sid) else "nsa"
+            if sa_adjust and bea_sa and not is_sa_id(sid):
                 m = seasonal_adjust(m)
+                adj = "nsa_sa"
+            prev = info.get(sid)
+            info[sid] = {"adj": ADJ_LABEL[adj] if not prev or prev["adj"] == ADJ_LABEL[adj] else "mixed",
+                         "mm": m.get(target, np.nan) if target is not None else np.nan}
             if target is not None and sid in overrides and pd.notna(overrides[sid]):
                 m.loc[target] = float(overrides[sid])
             ids.append(sid)
@@ -201,9 +219,13 @@ def build_inputs(resolved, levels: pd.DataFrame, sa_adjust=True, overrides=None,
                 s = s2 if s is None else s.where(s.index < r.start, s2)
                 ids = ids + ids2
         if s is not None:
+            const = float(getattr(r, "constant", 0.0) or 0.0) * 100   # fraction -> percentage points
+            if const:
+                s = s + const if r.start is None or pd.isna(r.start) else s.where(s.index < r.start, s + const)
             cols[r.line] = s
             used[r.line] = ids
     M = pd.DataFrame(cols)
+    build_inputs.info = info
     return M, used, sorted(missing)
 
 
@@ -304,7 +326,7 @@ def _group(key, meta, depth=3):
 
 
 def run(leaves: pd.DataFrame, resolved, M, actual_line: pd.DataFrame, nominal: pd.DataFrame,
-        proxy="trend3", core_cpi: pd.Series | None = None, carry=True):
+        proxy="trend3", core_cpi: pd.Series | None = None, carry=True, model_inputs: dict | None = None):
     """Nowcast every month in M's index. Returns dict of results."""
     idx = M.index.union(actual_line.index)
     lines = leaves["line"].tolist()
@@ -322,12 +344,17 @@ def run(leaves: pd.DataFrame, resolved, M, actual_line: pd.DataFrame, nominal: p
     S = M.reindex(index=idx, columns=lines)
     status = pd.DataFrame("data", index=idx, columns=lines)
     for ln in lines:
+        if model_inputs and ln in model_inputs:          # e.g. portfolio mgmt: equities − employment
+            S[ln] = model_inputs[ln].reindex(idx)
+            status[ln] = "model"
+            continue
         if kind.get(ln, "trend") in ("trend", "implicit"):
             S[ln] = np.nan
             status[ln] = "trend"
         elif ln not in M.columns:
             S[ln] = np.nan
             status[ln] = "series missing"
+    status = status.mask((status == "model") & S.isna(), "trend")   # model has no value -> stand-in
     if carry:
         prev = S.shift(1)
         carried = S.isna() & prev.notna() & (status == "data")
@@ -336,6 +363,16 @@ def run(leaves: pd.DataFrame, resolved, M, actual_line: pd.DataFrame, nominal: p
     fb = S.isna() & (status == "data")
     status = status.mask(fb, "fallback")
     F = S.where(S.notna(), P)
+    # nowcast rules: blend the source with the line's own published PCE m/m for the previous month
+    lag_w = resolved.set_index("line")["lag_w"] if "lag_w" in resolved else pd.Series(dtype=float)
+    lag_prev = {}
+    for ln in lines:
+        w = float(lag_w.get(ln, 0) or 0)
+        if w and kind.get(ln, "trend") not in ("trend", "implicit"):
+            prev = A[ln].shift(1).fillna(P[ln])
+            ok = status[ln].isin(["data", "carried"])
+            F[ln] = F[ln].where(~ok, w * prev + (1 - w) * F[ln])
+            lag_prev[ln] = (w, prev)
 
     sign = pd.Series(dict(zip(leaves.line, leaves.sign)))
     W = pd.DataFrame({ln: nominal[keys[ln]] for ln in lines}).reindex(idx).shift(1).ffill() * sign
@@ -351,7 +388,7 @@ def run(leaves: pd.DataFrame, resolved, M, actual_line: pd.DataFrame, nominal: p
     out = {
         "core": agg(F, is_core), "headline": agg(F, allm),
         "core_replicated": agg(A, is_core), "headline_replicated": agg(A, allm),
-        "values": F, "status": status, "weights": W,
+        "values": F, "status": status, "weights": W, "lag_prev": lag_prev,
         "contrib_core": W.loc[:, is_core[is_core].index].mul(F.loc[:, is_core[is_core].index])
             .div(W.loc[:, is_core[is_core].index].sum(axis=1), axis=0),
         "actual": A, "is_core": is_core,
