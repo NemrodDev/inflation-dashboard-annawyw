@@ -10,8 +10,11 @@ from core import charts as C
 from core import pce_map as PM
 from core import pm_model as PMM
 from core import npish_model as NPM
+from core import pce_cpi_gap as GAP
+from core import summary_measures as SMS
 from core import nowcast as N
 from tabs import common as U
+from tabs import gap_chart as GC
 
 PROXIES = {"Line's own 3m average (published PCE)": "trend3",
            "Line's last published m/m": "last",
@@ -610,6 +613,7 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, fred_key=None, 
     share = (wc.groupby(st_t.reindex(core_lines)).sum() / wc.sum() * 100) if wc.sum() else pd.Series(dtype=float)
     core_yy, _ = _yoy_estimate(pce.idx[pce.core], core_nc, target)
     head_yy, _ = _yoy_estimate(pce.idx[pce.headline], head_nc, target)
+    st.session_state["nc_summary"] = {"target": target, "core_yy": core_yy, "head_yy": head_yy}
     prev = target - pd.DateOffset(months=1)
     prev_lab = f"{prev:%b %Y}"
 
@@ -662,6 +666,56 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, fred_key=None, 
         st.caption(f"Implied rates (nowcast chained onto BEA data through {last_act:%b %Y})")
         U.show_df(t.style.format({c: "{:.2f}" for c in t.columns if c not in ("Measure", "Month")}
                                  | {"m/m %": "{:.3f}"}), hide_index=True)
+
+    # ---------------------------------------------------------- PCE vs CPI by category (with nowcast)
+    try:
+        pc, cc = GAP.pce_contrib(pce), GAP.cpi_contrib(cpi)
+        cpi_tot = core_cpi
+        avail = [d for d in pc.dropna(how="all").index if d < target and pd.notna(cpi_tot.get(d))]
+        st.subheader("Where core PCE differs from core CPI")
+        cpi_yy = SMS.yoy(cpi.idx[cpi.core])      # by calendar month (Oct 2025 CPI was never published)
+        prev_m = target - pd.DateOffset(months=1)
+        pce_yy_prev = pub_yy(pce.idx[pce.core])                    # published core PCE y/y, previous month
+        k = st.columns(3)
+        k[0].metric(f"Core PCE y/y, {target:%b %Y} (nowcast)", f"{core_yy:.2f}%")
+        under(k[0], pce_yy_prev, core_yy, 2)
+        k[1].metric(f"Core CPI y/y, {target:%b %Y} (actual)", f"{cpi_yy.get(target, np.nan):.2f}%")
+        under(k[1], cpi_yy.get(prev_m, np.nan), cpi_yy.get(target, np.nan), 2)
+        gap_now = core_yy - cpi_yy.get(target, np.nan)
+        k[2].metric("Gap: core PCE − core CPI", f"{gap_now:+.2f} pp")
+        under(k[2], pce_yy_prev - cpi_yy.get(prev_m, np.nan), gap_now, 2, unit=" pp")
+        if pd.notna(cpi_tot.get(target)):
+            months = list(avail[-11:]) + [target]
+            lab = lambda d: f"{d:%b %Y}" + (" (nowcast)" if d == target else "")  # noqa: E731
+            yy_opt = f"12-month (y/y) gap, {target:%b %Y} (nowcast)"
+            chosen, show_yy = GC.month_buttons(st, months, lab, "nc_gap_pick", yy_opt)
+            g = None
+            if chosen:
+                pub = [d for d in chosen if d != target]
+                g = GAP.gap(pc.loc[pub], cc.loc[pub]).T if pub else pd.DataFrame(index=pc.columns)
+                pce_tot = A.mom(pce.idx[pce.core])
+                tot = [pce_tot.get(d) - cpi_tot.get(d) for d in pub]
+                if target in chosen:
+                    g[target] = GAP.nowcast_contrib(res, leaves, pce, target) - cc.loc[target].reindex(g.index).fillna(0)
+                    tot.append(core_nc.get(target) - cpi_tot.get(target))
+                g.loc["Total"] = tot
+            yy = GAP.yy_gap(pce, cpi, target, core_yy, cpi_yy.get(target, np.nan),
+                            nowcast_mm=GAP.nowcast_cat_mm(res, leaves, pce, target)) if show_yy else None
+            if g is None and yy is None:
+                st.info("Pick at least one month or the 12-month gap above.")
+            else:
+                span = (f"{chosen[0]:%b} – {chosen[-1]:%b %Y}" if len(chosen) > 1 else f"{chosen[0]:%B %Y}") \
+                    if chosen else ""
+                title = "Core PCE minus core CPI, by category: " + " · ".join(
+                    x for x in ((f"m/m {span}" if chosen else ""), (f"y/y {target:%b %Y}" if show_yy else "")) if x)
+                U.show(GC.figure(g, [lab(d) for d in chosen], title, yy=yy, yy_label=yy_opt))
+            st.caption("Bars: PCE m/m contribution minus CPI m/m contribution to core, by category (pp), for each "
+                       f"month selected, stacked; {target:%B %Y} uses this nowcast with published CPI, earlier months "
+                       "use published PCE. Diamonds (or bars, if picked alone): the 12-month gap — each category's "
+                       "12-month change × its weight 12 months earlier, PCE minus CPI; its Total equals the y/y gap "
+                       "above and 'Residual' is what the category split doesn't capture.")
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"PCE–CPI category chart unavailable: {e}")
 
     # ---------------------------------------------------------- build-up
     st.subheader("Build-up by PCE category")
