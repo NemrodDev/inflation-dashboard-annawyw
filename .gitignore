@@ -1,0 +1,9 @@
+.streamlit/streamlit.toml
+.cache/*
+config/_pycache__/*
+core/__pycache__/*
+pages/__pycache__/*
+utils/__pycache__/*
+tests/__pycache__/*
+venv/__pycache__/*
+__pycache__/
