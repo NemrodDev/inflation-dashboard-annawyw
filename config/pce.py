@@ -71,6 +71,17 @@ CONTRIB_SPECS["Headline"]["Detailed"] = [
     {"label": "Energy", "terms": _t("Energy goods and services")},
 ] + CONTRIB_SPECS["Core"]["Detailed"]
 
+# "AI-exposed" consumer items, analogous to config/cpi.py AI_ITEMS. Lines of the underlying-detail table
+# (U20404/U20405), matched by description; label shown on the charts. Weights are PCE's own: each line's
+# share of total PCE spending in the previous month. BEA has no separate smartphone line: "Telephone and
+# related communication equipment" (mostly smartphones) is the closest, priced by BEA from CPI telephone hardware.
+AI_ITEMS = [
+    ("Personal computers/tablets and peripheral equipment", "Personal computers/tablets & peripherals"),
+    ("Computer software and accessories", "Computer software & accessories"),
+    ("Telephone and related communication equipment", "Telephones incl. smartphones"),
+    ("Televisions", "Televisions"),
+]
+
 # Underlying-detail ancestors that define food / energy for the "core only" diffusion option
 FOOD_ANCESTORS = ["Food and beverages purchased for off-premises consumption"]
 ENERGY_ANCESTORS = ["Gasoline and other energy goods", "Electricity and gas"]
