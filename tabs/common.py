@@ -1,6 +1,11 @@
 """Section renderers shared by the CPI, PPI and PCE tabs."""
 from __future__ import annotations
 
+import itertools
+import re
+import warnings
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -10,11 +15,62 @@ from core import charts as C
 
 
 # ------------------------------------------------------------------ helpers
-def show(fig):
+_DOWNLOADS = itertools.count()
+
+
+def fig_frame(fig) -> pd.DataFrame:
+    """The data a Plotly chart plots: one column per line/bar series, keyed by the x value (date or
+    category). Horizontal bars are keyed by their category; a histogram lists the values it plots."""
+    cols, hist, horizontal = [], [], False
+    for i, tr in enumerate(getattr(fig, "data", []) or []):
+        name = (getattr(tr, "name", None) or f"series {i + 1}").strip()
+        x, y = getattr(tr, "x", None), getattr(tr, "y", None)
+        if getattr(tr, "type", "") == "histogram":
+            v = x if x is not None else y
+            if v is not None:
+                hist.append(pd.Series(list(v), name=name))
+            continue
+        if x is None or y is None:
+            continue
+        if getattr(tr, "orientation", None) == "h":
+            x, y, horizontal = y, x, True
+        sr = pd.Series(list(y), index=list(x), name=name)
+        cols.append(sr[~sr.index.duplicated(keep="last")])
+    if not cols:
+        return pd.concat(hist, axis=1) if hist else pd.DataFrame()
+    out = pd.concat(cols, axis=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        idx = pd.to_datetime(pd.Series(out.index), errors="coerce")
+    if not horizontal and idx.notna().all():
+        out.index = pd.DatetimeIndex(idx)
+        out = out.sort_index()
+    xt = None if horizontal else getattr(getattr(getattr(fig.layout, "xaxis", None), "title", None), "text", None)
+    out.index.name = xt or ("Date" if isinstance(out.index, pd.DatetimeIndex) else "Category")
+    return out.reset_index()
+
+
+def _fig_name(fig) -> str:
+    t = getattr(getattr(fig.layout, "title", None), "text", None) or "chart"
+    t = re.sub(r"<[^>]+>", " ", t)
+    return re.sub(r"[^a-z0-9]+", "_", t.lower()).strip("_")[:60] or "chart"
+
+
+def show(fig, name: str | None = None):
+    """Draw a Plotly chart with a Download CSV button for its data underneath."""
     try:
         st.plotly_chart(fig, width="stretch")
     except TypeError:
         st.plotly_chart(fig, use_container_width=True)
+    try:
+        data = fig_frame(fig)
+    except Exception:  # noqa: BLE001
+        data = pd.DataFrame()
+    if not data.empty:
+        name = name or _fig_name(fig)
+        st.download_button("⬇ Download CSV", data.to_csv(index=False).encode(),
+                           file_name=f"{name}_{date.today():%Y-%m-%d}.csv", mime="text/csv",
+                           key=f"dl_{name}_{next(_DOWNLOADS)}")
 
 
 def numeric_columns(data: pd.DataFrame) -> list:

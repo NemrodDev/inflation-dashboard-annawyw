@@ -1,5 +1,6 @@
 """CPI/PPI -> PCE nowcast, line by line, on BEA's source-data table (Table 2.4.4U-D)."""
 import numpy as np
+import plotly.graph_objects as go
 import pandas as pd
 import streamlit as st
 
@@ -13,6 +14,7 @@ from core import npish_model as NPM
 from core import pce_cpi_gap as GAP
 from core import summary_measures as SMS
 from core import nowcast as N
+from core.builders import find_line
 from tabs import common as U
 from tabs import gap_chart as GC
 
@@ -717,6 +719,12 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, fred_key=None, 
     except Exception as e:  # noqa: BLE001
         st.caption(f"PCE–CPI category chart unavailable: {e}")
 
+    # ---------------------------------------------------------- AI-exposed categories (with nowcast)
+    try:
+        _ai_section(pce, res, leaves, used, target)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"AI-category chart unavailable: {e}")
+
     # ---------------------------------------------------------- build-up
     st.subheader("Build-up by PCE category")
     contrib = res["contrib_core"]
@@ -814,6 +822,144 @@ def render(cpi, pce, levels: pd.DataFrame | None, fetch_missing, fred_key=None, 
                                                                         if c in pce.meta.columns]]
         st.download_button("Download BEA API line list (CSV)", api.to_csv().encode(),
                            "bea_api_lines.csv", "text/csv", key="nc_api_dl")
+
+
+def _nc_mark(fig, nc_months):
+    """Show nowcast months differently: hatched bars, dotted line segments and a shaded band."""
+    if not nc_months:
+        return fig
+    ncs = set(pd.DatetimeIndex(nc_months))
+    extra = []
+    for tr in fig.data:
+        try:
+            xs = pd.to_datetime(list(tr.x))
+        except Exception:  # noqa: BLE001
+            continue
+        flag = [x in ncs for x in xs]
+        if not any(flag):
+            continue
+        if tr.type == "bar":
+            tr.marker.pattern = dict(shape=["/" if f else "" for f in flag], solidity=0.45)
+            tr.marker.opacity = [0.65 if f else 1.0 for f in flag]
+        elif tr.type == "scatter":
+            ys = list(tr.y)
+            first = flag.index(True)
+            seg = list(range(max(first - 1, 0), len(xs)))
+            extra.append(go.Scatter(x=[xs[i] for i in seg], y=[ys[i] for i in seg],
+                                    name=f"{tr.name} (nowcast)", mode="lines+markers", showlegend=False,
+                                    line=dict(color=tr.line.color, width=2.2, dash="dot"),
+                                    marker=dict(size=7, color=tr.line.color), hovertemplate="%{y:.2f} (nowcast)"))
+            tr.y = [None if f else y for f, y in zip(flag, ys)]
+    for t in extra:
+        fig.add_trace(t)
+    lo, hi = min(ncs) - pd.Timedelta(days=16), max(ncs) + pd.Timedelta(days=16)
+    fig.add_vrect(x0=lo, x1=hi, fillcolor="#F2C14E", opacity=0.15, line_width=0,
+                  annotation_text="nowcast", annotation_position="top left")
+    return fig
+
+
+def _ai_section(pce, res, leaves, used, target):
+    """The PCE tab's AI-exposed categories, extended with this tab's nowcast for the months BEA hasn't
+    published yet (each category = its workbook lines' nowcasts, spending-weighted)."""
+    st.subheader(f"AI-exposed categories, with the {target:%B %Y} nowcast")
+    found = [(find_line(pce.meta, n, "U:"), lab) for n, lab in PCE_CFG.AI_ITEMS]
+    found = [(k, lab) for k, lab in found if k and k in pce.idx.columns]
+    if not found:
+        st.info("AI category lines not available (the PCE underlying-detail table didn't load).")
+        return
+    codes, names = [k for k, _ in found], dict(found)
+    parent = pce.meta["parent"] if "parent" in pce.meta.columns else pd.Series(dtype=object)
+
+    def within(k, top):
+        for _ in range(20):
+            if k == top:
+                return True
+            k = parent.get(k)
+            if not isinstance(k, str):
+                return False
+        return False
+
+    lines_of = {k: leaves.loc[[within(x, k) for x in leaves.key], "line"].tolist() for k in codes}
+    F, W, S = res["values"], res["weights"], res["status"]
+    lvl0 = pce.idx[codes]
+    last_pub = lvl0.dropna(how="all").index.max()
+    nc_months = [d for d in F.index if last_pub < d <= target]
+    idx = pd.date_range(lvl0.index.min(), max([target, last_pub]), freq="MS")
+    mm = A.mom(lvl0).reindex(idx)
+    lvl = lvl0.reindex(idx)
+    for d in nc_months:
+        for k in codes:
+            lns = [l for l in lines_of[k] if l in F.columns]
+            if not lns or pd.notna(mm.at[d, k]):
+                continue
+            w, f = W.loc[d, lns].abs(), F.loc[d, lns]
+            ok = w.notna() & f.notna()
+            if ok.any() and w[ok].sum():
+                mm.at[d, k] = float((w[ok] * f[ok]).sum() / w[ok].sum())
+        prev = d - pd.DateOffset(months=1)
+        lvl.loc[d] = lvl.loc[d].fillna(lvl.loc[prev] * (1 + mm.loc[d] / 100))
+    nom = pce.extras.get("nominal")
+    try:
+        sh = nom[codes].div(nom[pce.headline], axis=0).reindex(idx)
+        wts = sh.shift(1).ffill()
+    except Exception:  # noqa: BLE001
+        wts = pce.weights[codes].reindex(idx).ffill()
+    contrib = (wts * mm * 100).rename(columns=names)
+    total = contrib.sum(axis=1, min_count=len(codes))
+    yy = A.yoy(lvl)
+    roll = (wts.shift(11) * yy * 100).rename(columns=names)
+    rt = roll.sum(axis=1, min_count=len(codes))
+    tag = f" (incl. {target:%b %Y} nowcast)" if nc_months else ""
+    c1, c2 = st.columns(2)
+    with c1:
+        span = contrib.dropna(how="all").iloc[-36:]
+        U.show(_nc_mark(C.stacked_contrib(span, total.reindex(span.index), "Contribution to headline PCE, m/m" + tag,
+                                          "basis points", total_name="AI basket total"), nc_months))
+    with c2:
+        r = U.win(roll).dropna(how="all")
+        U.show(_nc_mark(C.stacked_contrib(r, U.win(rt).reindex(r.index), "Contribution to headline PCE, y/y" + tag,
+                                          "basis points", total_name="AI basket total"), nc_months))
+    c3, c4 = st.columns(2)
+    with c3:
+        U.show(_nc_mark(C.lines(U.win(yy).rename(columns=names), "Price change y/y" + tag, "% y/y"), nc_months))
+    with c4:
+        base = U.win(lvl).dropna(how="all")
+        reb = base / base.bfill().iloc[0] * 100
+        U.show(_nc_mark(C.lines(reb.rename(columns=names), "Price level (rebased = 100)" + tag, "index"),
+                        nc_months))
+
+    # table: nowcast month by category
+    if target in mm.index:
+        prev = target - pd.DateOffset(months=1)
+        rows = []
+        for k in codes:
+            lns = lines_of[k]
+            stt = sorted(set(S.loc[target, [l for l in lns if l in S.columns]].dropna())) \
+                if target in S.index else []
+            sids = sorted({sid for l in lns for sid in used.get(l, [])})
+            rows.append({"Category": names[k], "Share of PCE %": wts.at[target, k] * 100,
+                         f"m/m {target:%b %y} %": mm.at[target, k],
+                         f"m/m {prev:%b %y} %": mm.at[prev, k] if prev in mm.index else np.nan,
+                         "Contribution m/m (bp)": contrib.at[target, names[k]],
+                         f"y/y {target:%b %y} %": yy.at[target, k],
+                         "Contribution y/y (bp)": roll.at[target, names[k]],
+                         "Nowcast inputs": (", ".join(stt) + (": " + ", ".join(sids) if sids else ""))
+                         if target in nc_months else "published by BEA"})
+        t = pd.DataFrame(rows)
+        tot = {"Category": "AI basket total", "Share of PCE %": t["Share of PCE %"].sum(),
+               "Contribution m/m (bp)": t["Contribution m/m (bp)"].sum(),
+               "Contribution y/y (bp)": t["Contribution y/y (bp)"].sum(), "Nowcast inputs": ""}
+        t = pd.concat([t, pd.DataFrame([tot])], ignore_index=True)
+        num = [c for c in t.columns if c not in ("Category", "Nowcast inputs")]
+        U.show_df(t.style.format({c: "{:.2f}" for c in num} | {"Share of PCE %": "{:.2f}"}, na_rep="–"),
+                  hide_index=True)
+        st.download_button("⬇ Download CSV", t.to_csv(index=False).encode(),
+                           f"pce_nowcast_ai_{target:%Y_%m}.csv", "text/csv", key="nc_ai_dl")
+    st.caption("Same categories and weights as the PCE tab's AI section: contribution = previous month's share "
+               "of total PCE spending × m/m change. Months after BEA's latest release "
+               f"({last_pub:%b %Y}) use this tab's nowcast — each category is the spending-weighted nowcast of "
+               "its BEA detail lines (with the settings above), chained onto BEA's index — and are shown hatched/"
+               "dotted in the shaded band. Their weights carry the last published spending share forward.")
 
 
 def _error_attribution(res, leaves, resolved, used, core_nc, actual_core, n):
